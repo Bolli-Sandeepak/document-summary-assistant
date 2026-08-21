@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Environment files (NEVER commit secrets to Git)
+.env
+.env.*
+*.env
+**/.env
+**/.env.*
+server/.env
+client/.env
+
+# Build output
+dist/
+build/
+**/*.tsbuildinfo
+**/dist/
+**/build/
+*.tsbuildinfo
+
+# Uploads / Temp files
+uploads/
+temp/
+*.log
+
+# OS & IDE junk
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
