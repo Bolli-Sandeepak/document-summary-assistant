@@ -102,14 +102,16 @@ async function getPerPageTexts(buffer) {
 // ────────────────────────────────────────────────────────────────
 // Step 3 — Render a single page to a PNG buffer for OCR
 // ────────────────────────────────────────────────────────────────
-async function renderPageToImage(pdfDoc, pageNum, scale = 2.2) {
+async function renderPageToImage(pdfDoc, pageNum, scale) {
+  const targetScale = scale || (process.env.NODE_ENV === 'production' ? 1.6 : 2.0);
   const page = await pdfDoc.getPage(pageNum);
-  const viewport = page.getViewport({ scale });
+  const viewport = page.getViewport({ scale: targetScale });
   const canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
   const ctx = canvas.getContext('2d');
 
   await page.render({ canvasContext: ctx, viewport }).promise;
-  return canvas.toBuffer('image/png');
+  const buf = canvas.toBuffer('image/png');
+  return buf;
 }
 
 // ────────────────────────────────────────────────────────────────

@@ -102,7 +102,7 @@ export async function uploadAndAnalyzeDocument(file, onProgress) {
     clearTimeout(timeoutId);
   }
 
-  throw new Error('Connection closed before processing completed. Please try again.');
+  throw new Error('Server connection was reset during processing. Render free instances sleep after inactivity — please click "Try Another Document" to retry now that the server is awake!');
 }
 
 /**
