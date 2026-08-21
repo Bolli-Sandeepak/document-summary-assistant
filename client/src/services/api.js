@@ -6,7 +6,8 @@
  * @returns {Promise<object>} Final analysis result on completion
  */
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || '';
+const rawApiUrl = (import.meta.env.VITE_API_URL || '').trim();
+const API_BASE_URL = rawApiUrl.endsWith('/') ? rawApiUrl.slice(0, -1) : rawApiUrl;
 
 export async function uploadAndAnalyzeDocument(file, onProgress) {
   const formData = new FormData();
