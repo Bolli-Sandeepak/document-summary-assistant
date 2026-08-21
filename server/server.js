@@ -61,11 +61,10 @@ app.get('/health', (req, res) => {
 // Global Error Middleware
 app.use(errorHandler);
 
-app.listen(PORT, () => {
-  console.log(`=================================`);
-  console.log(`Document Summary Assistant API Server`);
-  console.log(`Running on port: ${PORT}`);
-  console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`Gemini API configured: ${process.env.GEMINI_API_KEY ? 'Yes' : 'No (Using local statistical fallback engine)'}`);
-  console.log(`=================================`);
-});
+if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`Document Summary Assistant API Server running on port ${PORT}`);
+  });
+}
+
+export default app;
