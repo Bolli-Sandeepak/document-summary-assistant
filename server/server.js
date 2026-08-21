@@ -45,17 +45,35 @@ app.use('/api', limiter);
 // Mount API routes
 app.use('/api', summaryRoutes);
 
-// Health check & Root routes
-app.get('/', (req, res) => {
+import path from 'path';
+import fs from 'fs';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const clientDistPath = path.join(__dirname, '../client/dist');
+
+if (fs.existsSync(clientDistPath)) {
+  app.use(express.static(clientDistPath));
+}
+
+// Health check & Root fallback routes
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', uptime: process.uptime() });
+});
+
+// Wildcard SPA route
+app.get('*', (req, res, next) => {
+  if (req.path.startsWith('/api')) return next();
+  const indexPath = path.join(clientDistPath, 'index.html');
+  if (fs.existsSync(indexPath)) {
+    return res.sendFile(indexPath);
+  }
   res.json({
     name: 'Document Summary Assistant API',
     status: 'running',
     version: '1.0.0'
   });
-});
-
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', uptime: process.uptime() });
 });
 
 // Global Error Middleware
