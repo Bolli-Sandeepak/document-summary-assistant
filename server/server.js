@@ -45,13 +45,17 @@ app.use('/api', limiter);
 // Mount API routes
 app.use('/api', summaryRoutes);
 
-// Root route
+// Health check & Root routes
 app.get('/', (req, res) => {
   res.json({
     name: 'Document Summary Assistant API',
     status: 'running',
     version: '1.0.0'
   });
+});
+
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', uptime: process.uptime() });
 });
 
 // Global Error Middleware
