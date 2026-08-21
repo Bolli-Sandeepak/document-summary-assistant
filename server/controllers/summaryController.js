@@ -18,7 +18,10 @@ export async function analyzeDocument(req, res) {
   res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders();
 
-  // Keep-alive heartbeat every 10 seconds to prevent connection timeouts during long OCR/Gemini jobs
+  // Immediately write initial comment chunk to force proxy stream opening
+  res.write(': stream-start\n\n');
+
+  // Keep-alive heartbeat every 4 seconds to prevent Render proxy timeouts during OCR/Gemini jobs
   const heartbeatTimer = setInterval(() => {
     try {
       res.write(': keepalive\n\n');
@@ -26,7 +29,7 @@ export async function analyzeDocument(req, res) {
     } catch {
       clearInterval(heartbeatTimer);
     }
-  }, 10000);
+  }, 4000);
 
   const cleanup = () => clearInterval(heartbeatTimer);
 

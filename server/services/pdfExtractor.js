@@ -194,6 +194,9 @@ export async function extractTextFromPDF(buffer, onProgress) {
 
   try {
     for (let i = 0; i < totalPages; i++) {
+      // Yield to event loop so SSE keep-alive timers can execute freely
+      await new Promise(resolve => setImmediate(resolve));
+
       const pageNum = i + 1;
       const pageText = pageTexts[i] || '';
 
@@ -203,7 +206,7 @@ export async function extractTextFromPDF(buffer, onProgress) {
           textParts.push(pageText);
         }
       } else {
-        // OCR this page with 25s timeout limit
+        // OCR this page with timeout limit
         onProgress?.({
           type: 'progress',
           step: 'ocr_pages',
@@ -213,7 +216,7 @@ export async function extractTextFromPDF(buffer, onProgress) {
         });
 
         try {
-          const imageBuffer = await renderPageToImage(pdfDoc, pageNum, 2.2);
+          const imageBuffer = await renderPageToImage(pdfDoc, pageNum);
           
           const ocrPromise = ocrWorker.recognize(imageBuffer);
           const timeoutPromise = new Promise((_, reject) => 
