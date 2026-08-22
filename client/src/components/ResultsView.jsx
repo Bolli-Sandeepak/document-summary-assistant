@@ -17,7 +17,7 @@ export function ResultsView({ results, onReset, onShowToast }) {
   const [summaryLength, setSummaryLength] = useState('medium'); // 'short' | 'medium' | 'long'
   const [copiedSection, setCopiedSection] = useState(null);
 
-  const { document, extractedText, summaries, keyPoints, importantTerms = [], improvementSuggestions = [] } = results;
+  const { document: docInfo, extractedText, summaries, keyPoints, importantTerms = [], improvementSuggestions = [] } = results;
 
   const currentSummaryText = summaries?.[summaryLength] || summaries?.medium || 'Summary unavailable.';
 
@@ -31,10 +31,10 @@ export function ResultsView({ results, onReset, onShowToast }) {
   const handleDownloadTxt = () => {
     const content = `DOCUMENT SUMMARY REPORT
 ====================================
-Document: ${document.filename}
-Method: ${document.extractionMethod}
-Pages: ${document.pages || 1}
-Word Count: ${document.wordCount} words
+Document: ${docInfo.filename}
+Method: ${docInfo.extractionMethod}
+Pages: ${docInfo.pages || 1}
+Word Count: ${docInfo.wordCount} words
 Date: ${new Date().toLocaleDateString()}
 
 ====================================
@@ -60,12 +60,12 @@ ${extractedText}
 
     const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
+    const link = globalThis.document.createElement('a');
     link.href = url;
-    link.download = `${document.filename.replace(/\.[^/.]+$/, '')}_summary.txt`;
-    document.body.appendChild(link);
+    link.download = `${docInfo.filename.replace(/\.[^/.]+$/, '')}_summary.txt`;
+    globalThis.document.body.appendChild(link);
     link.click();
-    document.body.removeChild(link);
+    globalThis.document.body.removeChild(link);
     URL.revokeObjectURL(url);
 
     onShowToast('Summary downloaded as TXT file.');
@@ -87,20 +87,20 @@ ${extractedText}
           <FileText size={22} style={{ color: 'var(--accent-primary)' }} />
           <div>
             <h3 style={{ fontSize: '1rem', fontWeight: 650, color: 'var(--text-primary)' }}>
-              {document.filename}
+              {docInfo.filename}
             </h3>
             <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
-              {formatFileSize(document.fileSize)} • {document.pages || 1} page(s)
+              {formatFileSize(docInfo.fileSize)} • {docInfo.pages || 1} page(s)
             </div>
           </div>
         </div>
 
         <div className="doc-badges">
-          <span className="badge accent">{document.extractionMethod}</span>
-          <span className="badge">{document.wordCount} words</span>
-          {document.ocrConfidence && (
+          <span className="badge accent">{docInfo.extractionMethod}</span>
+          <span className="badge">{docInfo.wordCount} words</span>
+          {docInfo.ocrConfidence && (
             <span className="badge" style={{ color: 'var(--success-text)' }}>
-              {document.ocrConfidence}% OCR
+              {docInfo.ocrConfidence}% OCR
             </span>
           )}
         </div>
@@ -217,7 +217,7 @@ ${extractedText}
           <div>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
               <span style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>
-                Showing raw extracted text ({document.charCount} characters)
+                Showing raw extracted text ({docInfo.charCount} characters)
               </span>
               <button
                 type="button"

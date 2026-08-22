@@ -5,253 +5,186 @@ const pdfParse = require('pdf-parse');
 import { cleanExtractedText } from './textCleaner.js';
 
 // ────────────────────────────────────────────────────────────────
-// Optional rendering dependencies (pdfjs-dist + canvas)
-// Loaded lazily so the server starts even if they're not installed.
+// Minimum viable text thresholds
 // ────────────────────────────────────────────────────────────────
-let pdfjsLib = null;
-let createCanvas = null;
+const MIN_CHARS_FOR_VALID_TEXT = 50;
+const WORDS_PER_PAGE_THRESHOLD = 15; // below this = likely scanned
 
-function loadRenderingDeps() {
-  if (pdfjsLib && createCanvas) return true;
-  try {
-    pdfjsLib = require('pdfjs-dist/legacy/build/pdf.js');
-    // Disable the web worker — not available in Node.js
-    pdfjsLib.GlobalWorkerOptions.workerSrc = '';
-    
-    // Try loading @napi-rs/canvas first, then fallback to canvas
-    let canvasPkg;
-    try {
-      canvasPkg = require('@napi-rs/canvas');
-    } catch {
-      canvasPkg = require('canvas');
-    }
-    createCanvas = canvasPkg.createCanvas;
-    return true;
-  } catch (err) {
-    console.warn('[pdfExtractor] canvas/pdfjs-dist not available:', err.message);
-    return false;
-  }
-}
-
-// ────────────────────────────────────────────────────────────────
-// Heuristic: is the text extracted from this page sufficient?
-// ────────────────────────────────────────────────────────────────
-const WORDS_PER_PAGE_THRESHOLD = 25; // below this → OCR the page
-
-function pageNeedsOCR(pageText) {
-  const words = (pageText || '').split(/\s+/).filter(w => w.length > 1);
-  return words.length < WORDS_PER_PAGE_THRESHOLD;
-}
-
-function overallNeedsOCR(text, pageCount) {
-  const words = (text || '').split(/\s+/).filter(w => w.length > 1);
-  const avgWordsPerPage = words.length / Math.max(pageCount, 1);
-  return avgWordsPerPage < WORDS_PER_PAGE_THRESHOLD;
-}
-
-// ────────────────────────────────────────────────────────────────
-// Step 1 — Quick extraction via pdf-parse
-// ────────────────────────────────────────────────────────────────
-async function quickExtract(buffer) {
-  try {
-    const data = await pdfParse(buffer);
-    return {
-      text: (data.text || '').replace(/\r\n/g, '\n').trim(),
-      pages: data.numpages || 1,
-    };
-  } catch (err) {
-    throw new Error(`Could not read the PDF file: ${err.message}`);
-  }
-}
-
-// ────────────────────────────────────────────────────────────────
-// Step 2 — Per-page text extraction via pdfjs-dist
-// ────────────────────────────────────────────────────────────────
-async function getPerPageTexts(buffer) {
-  const data = new Uint8Array(buffer);
-  const pdfDoc = await pdfjsLib.getDocument({
-    data,
-    useWorkerFetch: false,
-    isEvalSupported: false,
-    useSystemFonts: true,
-    disableFontFace: true,
-  }).promise;
-
-  const pageCount = pdfDoc.numPages;
-  const pageTexts = [];
-
-  for (let i = 1; i <= pageCount; i++) {
-    try {
-      const page = await pdfDoc.getPage(i);
-      const content = await page.getTextContent();
-      const text = content.items
-        .map(item => (item.str || '').trim())
-        .filter(Boolean)
-        .join(' ')
-        .replace(/\s+/g, ' ')
-        .trim();
-      pageTexts.push(text);
-    } catch {
-      pageTexts.push('');
-    }
-  }
-
-  return { pdfDoc, pageTexts, pageCount };
-}
-
-// ────────────────────────────────────────────────────────────────
-// Step 3 — Render a single page to a PNG buffer for OCR
-// ────────────────────────────────────────────────────────────────
-async function renderPageToImage(pdfDoc, pageNum, scale) {
-  const targetScale = scale || (process.env.NODE_ENV === 'production' ? 1.6 : 2.0);
-  const page = await pdfDoc.getPage(pageNum);
-  const viewport = page.getViewport({ scale: targetScale });
-  const canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
-  const ctx = canvas.getContext('2d');
-
-  await page.render({ canvasContext: ctx, viewport }).promise;
-  const buf = canvas.toBuffer('image/png');
-  return buf;
-}
-
-// ────────────────────────────────────────────────────────────────
-// Main export — full hybrid PDF extraction pipeline
-// onProgress(event) emits structured progress objects to the caller
-// ────────────────────────────────────────────────────────────────
+/**
+ * Main PDF text extraction pipeline.
+ * Uses pdf-parse for text extraction with enhanced post-processing.
+ * 
+ * @param {Buffer} buffer - PDF file buffer
+ * @param {Function} onProgress - Progress callback
+ * @returns {Promise<{text: string, pages: number, extractionMethod: string, isScanned: boolean}>}
+ */
 export async function extractTextFromPDF(buffer, onProgress) {
   const emit = (msg, extra = {}) => onProgress?.({ type: 'progress', message: msg, ...extra });
 
-  // ── Step 1: Quick text extraction ─────────────────────────────
-  emit('Checking document...', { step: 'checking' });
-  const { text: quickText, pages: pageCount } = await quickExtract(buffer);
+  // ── Step 1: Extract text using pdf-parse ──────────────────────
+  emit('Reading document...', { step: 'checking' });
 
-  emit('Extracting text...', { step: 'extracting' });
+  let rawText = '';
+  let pageCount = 1;
 
-  // ── Step 2: Is the text good enough without OCR? ──────────────
-  if (!overallNeedsOCR(quickText, pageCount)) {
-    const cleaned = cleanExtractedText(quickText);
-    return {
-      text: cleaned,
-      pages: pageCount,
-      extractionMethod: 'PDF Text Extraction',
-      isScanned: false,
-    };
+  try {
+    const data = await pdfParse(buffer, {
+      // Custom page renderer to get better text from each page
+      pagerender: renderPage
+    });
+    rawText = (data.text || '').trim();
+    pageCount = data.numpages || 1;
+  } catch (err) {
+    throw new Error(`Could not read the PDF file. It may be corrupted or password-protected: ${err.message}`);
   }
 
-  // ── Step 3: Need per-page hybrid extraction ───────────────────
-  emit('Scanned content detected — analyzing pages...', { step: 'ocr_detect' });
+  emit('Extracting text...', { step: 'extracting' });
+  console.log(`[PDF] Raw extraction: ${pageCount} pages, ${rawText.length} chars`);
 
-  // Check if rendering dependencies are available
-  if (!loadRenderingDeps()) {
-    // Fallback: return what pdf-parse gave us, cleaned
-    const cleaned = cleanExtractedText(quickText);
+  // ── Step 2: Check if PDF is scanned/image-based ───────────────
+  const wordCount = rawText.split(/\s+/).filter(w => w.length > 1).length;
+  const avgWordsPerPage = wordCount / Math.max(pageCount, 1);
+  const isScanned = avgWordsPerPage < WORDS_PER_PAGE_THRESHOLD;
+
+  if (isScanned || rawText.length < MIN_CHARS_FOR_VALID_TEXT) {
+    console.log(`[PDF] Detected as scanned/image-based (avg ${avgWordsPerPage.toFixed(1)} words/page)`);
+
+    // Return what we have with a clear flag
+    const cleaned = cleanExtractedText(rawText);
     return {
-      text: cleaned || 'Could not extract sufficient text from this PDF. Try uploading as an image (PNG/JPG) for OCR.',
+      text: cleaned || 'This PDF appears to be scanned or image-based. Text extraction is limited for this type of document. For better results, please upload a text-based PDF where you can select and copy text.',
       pages: pageCount,
       extractionMethod: 'PDF Text Extraction (Limited)',
       isScanned: true,
     };
   }
 
-  // ── Step 4: Per-page analysis ─────────────────────────────────
-  let perPageData;
-  try {
-    perPageData = await getPerPageTexts(buffer);
-  } catch (err) {
-    console.warn('[pdfExtractor] Per-page extraction failed:', err.message);
-    const cleaned = cleanExtractedText(quickText);
-    return {
-      text: cleaned,
-      pages: pageCount,
-      extractionMethod: 'PDF Text Extraction (Partial)',
-      isScanned: false,
-    };
-  }
+  // ── Step 3: Clean and normalize the extracted text ────────────
+  emit('Processing text...', { step: 'cleaning' });
 
-  const { pdfDoc, pageTexts, pageCount: totalPages } = perPageData;
-  const pagesNeedingOCR = pageTexts.filter(pageNeedsOCR).length;
+  const cleaned = cleanExtractedText(rawText);
 
-  emit(
-    pagesNeedingOCR > 0
-      ? `Reading document — ${pagesNeedingOCR} of ${totalPages} pages require OCR...`
-      : 'Extracting content from all pages...',
-    { step: pagesNeedingOCR > 0 ? 'ocr_detect' : 'extracting', ocrNeeded: pagesNeedingOCR > 0, totalPages }
-  );
-
-  // ── Step 5: Lazy-import tesseract to avoid double-loading ──────
-  const { createWorker } = await import('tesseract.js');
-  let ocrWorker = null;
-  if (pagesNeedingOCR > 0) {
-    try {
-      ocrWorker = await createWorker('eng');
-    } catch (workerErr) {
-      console.warn('[pdfExtractor] Failed to initialize Tesseract worker:', workerErr.message);
-    }
-  }
-
-  const textParts = [];
-  let usedOCR = false;
-
-  try {
-    for (let i = 0; i < totalPages; i++) {
-      // Yield to event loop so SSE keep-alive timers can execute freely
-      await new Promise(resolve => setImmediate(resolve));
-
-      const pageNum = i + 1;
-      const pageText = pageTexts[i] || '';
-
-      if (!pageNeedsOCR(pageText) || !ocrWorker) {
-        // Good text extraction for this page or OCR unavailable
-        if (pageText.trim()) {
-          textParts.push(pageText);
-        }
-      } else {
-        // OCR this page with timeout limit
-        onProgress?.({
-          type: 'progress',
-          step: 'ocr_pages',
-          message: `Extracting text from page ${pageNum} of ${totalPages}...`,
-          current: pageNum,
-          total: totalPages,
-        });
-
-        try {
-          const imageBuffer = await renderPageToImage(pdfDoc, pageNum);
-          
-          const ocrPromise = ocrWorker.recognize(imageBuffer);
-          const timeoutPromise = new Promise((_, reject) => 
-            setTimeout(() => reject(new Error(`OCR timeout on page ${pageNum}`)), 60000)
-          );
-          
-          const ocrResult = await Promise.race([ocrPromise, timeoutPromise]);
-          const ocrText = (ocrResult.data.text || '').replace(/\r\n/g, '\n').trim();
-
-          if (ocrText.length > 15) {
-            textParts.push(ocrText);
-            usedOCR = true;
-          } else if (pageText.trim()) {
-            textParts.push(pageText);
-          }
-        } catch (ocrErr) {
-          console.warn(`[pdfExtractor] OCR skipped for page ${pageNum}:`, ocrErr.message);
-          if (pageText.trim()) textParts.push(pageText);
-        }
-      }
-    }
-  } finally {
-    if (ocrWorker) {
-      await ocrWorker.terminate().catch(() => {});
-    }
-  }
-
-  // ── Step 7: Combine, clean, return ────────────────────────────
-  const combinedRaw = textParts.join('\n\n');
-  const cleaned = cleanExtractedText(combinedRaw);
+  console.log(`[PDF] Cleaned text: ${cleaned.length} chars (from ${rawText.length} raw chars)`);
 
   return {
-    text: cleaned || quickText || 'Text extraction was not successful for this document.',
-    pages: totalPages,
-    extractionMethod: usedOCR ? 'PDF + OCR' : 'PDF Text Extraction',
-    isScanned: usedOCR,
+    text: cleaned,
+    pages: pageCount,
+    extractionMethod: 'PDF Text Extraction',
+    isScanned: false,
   };
+}
+
+/**
+ * Custom page renderer for pdf-parse.
+ * Extracts text content from each page with better formatting.
+ * This function is called by pdf-parse for each page.
+ */
+async function renderPage(pageData) {
+  try {
+    const textContent = await pageData.getTextContent();
+    if (!textContent || !textContent.items || textContent.items.length === 0) {
+      return '';
+    }
+
+    const lines = [];
+    let currentLine = '';
+    let lastY = null;
+    let lastX = null;
+    let lastWidth = 0;
+    let lastFontSize = 0;
+
+    for (const item of textContent.items) {
+      if (!item.str && !item.str === '') continue;
+
+      const text = item.str;
+      const transform = item.transform || [];
+      const fontSize = transform[0] || 12;
+      const x = transform[4] || 0;
+      const y = transform[5] || 0;
+      const width = item.width || 0;
+
+      if (lastY === null) {
+        // First item
+        currentLine = text;
+        lastY = y;
+        lastX = x;
+        lastWidth = width;
+        lastFontSize = fontSize;
+        continue;
+      }
+
+      // Detect line break: Y position changed significantly
+      const yDiff = Math.abs(y - lastY);
+      const lineBreakThreshold = Math.max(fontSize * 0.5, 3);
+
+      if (yDiff > lineBreakThreshold) {
+        // New line — push the current line
+        if (currentLine.trim()) {
+          lines.push(currentLine.trim());
+        }
+
+        // If Y difference is large, this might be a paragraph break
+        const paragraphThreshold = fontSize * 1.8;
+        if (yDiff > paragraphThreshold && currentLine.trim()) {
+          lines.push(''); // Empty line = paragraph break
+        }
+
+        currentLine = text;
+        lastY = y;
+        lastX = x;
+        lastWidth = width;
+        lastFontSize = fontSize;
+        continue;
+      }
+
+      // Same line — check if we need a space between items
+      const expectedX = lastX + lastWidth;
+      const gap = x - expectedX;
+      const spaceWidth = fontSize * 0.3;
+
+      if (gap > spaceWidth) {
+        // Gap between items — add a space
+        currentLine += ' ' + text;
+      } else if (gap < -fontSize * 0.5) {
+        // Overlapping or far left — likely a new column or repositioned text
+        currentLine += ' ' + text;
+      } else {
+        // Adjacent items — check if space is needed
+        if (text.length > 0 && currentLine.length > 0) {
+          const lastChar = currentLine[currentLine.length - 1];
+          const firstChar = text[0];
+
+          // Add space if the last char is alphanumeric and first char is also alphanumeric
+          if (/[a-zA-Z0-9,;:.]/.test(lastChar) && /[a-zA-Z0-9(]/.test(firstChar) && gap > 0.5) {
+            currentLine += ' ' + text;
+          } else {
+            currentLine += text;
+          }
+        } else {
+          currentLine += text;
+        }
+      }
+
+      lastY = y;
+      lastX = x;
+      lastWidth = width;
+      lastFontSize = fontSize;
+    }
+
+    // Push the last line
+    if (currentLine.trim()) {
+      lines.push(currentLine.trim());
+    }
+
+    // Join lines with newlines and add page separator
+    return lines.join('\n') + '\n\n';
+  } catch (err) {
+    // Fallback: use default text extraction
+    try {
+      const textContent = await pageData.getTextContent();
+      return textContent.items.map(item => item.str).join(' ') + '\n\n';
+    } catch {
+      return '';
+    }
+  }
 }

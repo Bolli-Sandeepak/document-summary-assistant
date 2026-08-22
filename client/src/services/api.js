@@ -1,20 +1,45 @@
 /**
- * API client — streams SSE progress events from POST /api/analyze.
- *
- * @param {File} file - The file to upload
- * @param {(event: object) => void} onProgress - Called for each progress event
- * @returns {Promise<object>} Final analysis result on completion
+ * API client for Document Summary Assistant.
+ * Uses standard JSON fetch (no SSE streaming) for Vercel serverless compatibility.
  */
 
 const rawApiUrl = (import.meta.env.VITE_API_URL || '').trim();
 const API_BASE_URL = rawApiUrl.endsWith('/') ? rawApiUrl.slice(0, -1) : rawApiUrl;
 
+/**
+ * Upload a document and get analysis results.
+ * 
+ * @param {File} file - The file to upload
+ * @param {(event: object) => void} onProgress - Called for simulated progress events
+ * @returns {Promise<object>} Analysis result
+ */
 export async function uploadAndAnalyzeDocument(file, onProgress) {
   const formData = new FormData();
   formData.append('file', file);
 
+  // Start simulated progress
+  const progressStages = [
+    { message: 'Uploading document...', step: 'uploading', delay: 0 },
+    { message: 'Extracting text from document...', step: 'extracting', delay: 2000 },
+    { message: 'Analyzing content...', step: 'analyzing', delay: 6000 },
+    { message: 'Generating summary...', step: 'summarizing', delay: 12000 },
+    { message: 'Organizing key points...', step: 'organizing', delay: 20000 },
+  ];
+
+  const progressTimers = [];
+  for (const stage of progressStages) {
+    const timer = setTimeout(() => {
+      onProgress?.({ message: stage.message, step: stage.step });
+    }, stage.delay);
+    progressTimers.push(timer);
+  }
+
+  const clearProgressTimers = () => {
+    progressTimers.forEach(t => clearTimeout(t));
+  };
+
   const controller = new AbortController();
-  // Hard limit 3 minutes overall
+  // Overall timeout: 3 minutes for large documents
   const timeoutId = setTimeout(() => controller.abort(), 180000);
 
   let response;
@@ -23,86 +48,79 @@ export async function uploadAndAnalyzeDocument(file, onProgress) {
       method: 'POST',
       body: formData,
       signal: controller.signal,
+      // Do NOT set Content-Type manually — let the browser set it with the correct boundary
     });
   } catch (networkErr) {
     clearTimeout(timeoutId);
+    clearProgressTimers();
+
     if (networkErr.name === 'AbortError') {
-      throw new Error('Document processing timed out after 3 minutes. Please try again with a smaller file or clearer text.');
+      throw new Error('Document processing timed out after 3 minutes. Please try with a smaller file.');
     }
-    throw new Error('Cannot reach the server. Please ensure the backend is running and try again.');
+
+    // Distinguish CORS errors from general network errors
+    if (networkErr.message?.includes('Failed to fetch') || networkErr.message?.includes('NetworkError')) {
+      throw new Error('Cannot connect to the server. The backend service may be starting up — please wait a moment and try again.');
+    }
+
+    throw new Error('Network error: Unable to reach the server. Please check your internet connection and try again.');
   }
 
+  clearTimeout(timeoutId);
+  clearProgressTimers();
+
+  // Handle non-OK responses
   if (!response.ok) {
-    clearTimeout(timeoutId);
-    const msg = await response.text().catch(() => '');
-    throw new Error(`Upload failed (${response.status}): ${msg || 'Please check the file and try again.'}`);
-  }
-
-  // Read the SSE stream via fetch ReadableStream
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-
-  try {
-    while (true) {
-      const readPromise = reader.read();
-      // 120-second read stall timeout
-      const stallPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('StallTimeout')), 120000)
-      );
-
-      let chunk;
-      try {
-        chunk = await Promise.race([readPromise, stallPromise]);
-      } catch (err) {
-        if (err.message === 'StallTimeout') {
-          reader.cancel().catch(() => {});
-          throw new Error('Processing connection stalled. Please try uploading again.');
-        }
-        throw err;
-      }
-
-      const { done, value } = chunk;
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-
-      const parts = buffer.split('\n\n');
-      buffer = parts.pop(); // keep the incomplete trailing chunk
-
-      for (const part of parts) {
-        if (part.trim().startsWith(':')) continue; // skip SSE keep-alive comments
-
-        const dataLine = part.split('\n').find(l => l.startsWith('data: '));
-        if (!dataLine) continue;
-
-        let event;
-        try {
-          event = JSON.parse(dataLine.slice(6)); // strip "data: "
-        } catch {
-          continue;
-        }
-
-        if (event.type === 'complete') {
-          clearTimeout(timeoutId);
-          return event;
-        }
-
-        if (event.type === 'error') {
-          clearTimeout(timeoutId);
-          throw new Error(event.message || 'Document processing failed.');
-        }
-
-        if (event.type === 'progress' && onProgress) {
-          onProgress(event);
-        }
-      }
+    let errorData;
+    try {
+      errorData = await response.json();
+    } catch {
+      const text = await response.text().catch(() => '');
+      throw new Error(`Server error (${response.status}): ${text || 'Please try again.'}`);
     }
-  } finally {
-    clearTimeout(timeoutId);
+
+    // Map error types to user-friendly messages
+    const errorType = errorData.errorType || '';
+    const serverMessage = errorData.error || 'An error occurred while processing your document.';
+
+    switch (errorType) {
+      case 'NO_FILE':
+        throw new Error('No file was received by the server. Please select a file and try again.');
+      case 'UNSUPPORTED_FORMAT':
+        throw new Error(serverMessage);
+      case 'FILE_TOO_LARGE':
+        throw new Error('The file is too large. Please upload a document smaller than 15MB.');
+      case 'EXTRACTION_FAILED':
+        throw new Error(serverMessage);
+      case 'OCR_FAILED':
+        throw new Error(serverMessage);
+      case 'INVALID_PDF':
+        throw new Error('The PDF file appears to be corrupted or password-protected. Please try a different file.');
+      case 'TIMEOUT':
+        throw new Error('Processing took too long. Please try a smaller or simpler document.');
+      case 'AI_API_ERROR':
+        throw new Error('The AI summarization service is temporarily unavailable. The system will use a local summarizer — please try again.');
+      default:
+        throw new Error(serverMessage);
+    }
   }
 
-  throw new Error('Server connection was reset during processing. Render free instances sleep after inactivity — please click "Try Another Document" to retry now that the server is awake!');
+  // Parse JSON response
+  let data;
+  try {
+    data = await response.json();
+  } catch {
+    throw new Error('Invalid response from server. Please try again.');
+  }
+
+  if (!data.success) {
+    throw new Error(data.error || 'Document processing failed. Please try again.');
+  }
+
+  // Signal completion
+  onProgress?.({ message: 'Analysis complete!', step: 'complete' });
+
+  return data;
 }
 
 /**
@@ -112,7 +130,7 @@ export async function getDocuments() {
   const response = await fetch(`${API_BASE_URL}/api/documents`);
   const data = await response.json();
   if (!response.ok || !data.success) {
-    throw new Error(data.error || 'Failed to fetch document history');
+    throw new Error(data.error || 'Failed to fetch document history.');
   }
   return data.data;
 }
@@ -124,7 +142,7 @@ export async function getDocumentById(id) {
   const response = await fetch(`${API_BASE_URL}/api/documents/${id}`);
   const data = await response.json();
   if (!response.ok || !data.success) {
-    throw new Error(data.error || 'Failed to fetch document details');
+    throw new Error(data.error || 'Failed to fetch document details.');
   }
   return data.data;
 }
@@ -138,7 +156,7 @@ export async function deleteDocument(id) {
   });
   const data = await response.json();
   if (!response.ok || !data.success) {
-    throw new Error(data.error || 'Failed to delete document summary');
+    throw new Error(data.error || 'Failed to delete document summary.');
   }
   return data;
 }

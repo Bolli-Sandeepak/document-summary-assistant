@@ -7,45 +7,18 @@ import { cleanExtractedText } from '../services/textCleaner.js';
 
 /**
  * POST /api/analyze
- * Accepts a multipart file upload, responds with an SSE stream of progress events
- * followed by the final analysis result. Saves to MongoDB if connection is active.
+ * Accepts a multipart file upload, processes the document, and returns
+ * a JSON response with the analysis results.
+ * 
+ * Switched from SSE streaming to regular JSON for Vercel serverless compatibility.
  */
 export async function analyzeDocument(req, res) {
-  // Set SSE headers
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection', 'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no');
-  res.flushHeaders();
-
-  // Immediately write initial comment chunk to force proxy stream opening
-  res.write(': stream-start\n\n');
-
-  // Keep-alive heartbeat every 4 seconds to prevent Render proxy timeouts during OCR/Gemini jobs
-  const heartbeatTimer = setInterval(() => {
-    try {
-      res.write(': keepalive\n\n');
-      if (typeof res.flush === 'function') res.flush();
-    } catch {
-      clearInterval(heartbeatTimer);
-    }
-  }, 4000);
-
-  const cleanup = () => clearInterval(heartbeatTimer);
-
-  const send = (type, payload = {}) => {
-    res.write(`data: ${JSON.stringify({ type, ...payload })}\n\n`);
-    if (typeof res.flush === 'function') res.flush();
-  };
-
-  const sendProgress = (message, extra = {}) => send('progress', { message, ...extra });
-  const sendComplete = (data) => { cleanup(); send('complete', data); res.end(); };
-  const sendError = (message) => { cleanup(); send('error', { message }); res.end(); };
-
-  req.on('close', cleanup);
-
   if (!req.file) {
-    return sendError('No document file provided. Please upload a PDF, PNG, or JPG document.');
+    return res.status(400).json({
+      success: false,
+      errorType: 'NO_FILE',
+      error: 'No document file provided. Please upload a PDF, PNG, or JPG document.'
+    });
   }
 
   const { originalname, mimetype, buffer, size } = req.file;
@@ -56,7 +29,11 @@ export async function analyzeDocument(req, res) {
   console.log(`[UPLOAD] File received: "${originalname}" (${size} bytes, ${mimetype})`);
 
   if (!isPdf && !isImage) {
-    return sendError('Unsupported file format. Please upload a PDF, JPG, JPEG, or PNG document.');
+    return res.status(415).json({
+      success: false,
+      errorType: 'UNSUPPORTED_FORMAT',
+      error: 'Unsupported file format. Please upload a PDF, JPG, JPEG, or PNG document.'
+    });
   }
 
   let extractionResult = { text: '', method: '', pages: 1, isScanned: false, ocrConfidence: null };
@@ -65,11 +42,8 @@ export async function analyzeDocument(req, res) {
     // ── PDF pipeline ─────────────────────────────────────────
     if (isPdf) {
       const pdfResult = await extractTextFromPDF(buffer, (event) => {
-        sendProgress(event.message, {
-          step: event.step || (event.current ? 'ocr_pages' : 'extracting'),
-          current: event.current,
-          total: event.total
-        });
+        // Progress events logged server-side (no SSE in serverless)
+        console.log(`[PDF Progress] ${event.message}`);
       });
 
       extractionResult.text = pdfResult.text;
@@ -80,35 +54,45 @@ export async function analyzeDocument(req, res) {
       console.log(`[PDF] Pages: ${pdfResult.pages}, Method: ${pdfResult.extractionMethod}, Scanned: ${pdfResult.isScanned}, Extracted chars: ${pdfResult.text?.length || 0}`);
 
       if (!pdfResult.text || pdfResult.text.trim().length < 15) {
-        return sendError('Unable to extract readable text from this PDF. This may be a scanned or image-only PDF without clear text. Please upload a text-based PDF or higher resolution scan.');
+        return res.status(422).json({
+          success: false,
+          errorType: 'EXTRACTION_FAILED',
+          error: 'Unable to extract readable text from this PDF. This may be a scanned or image-only PDF. Please upload a text-based PDF where you can select and copy text.'
+        });
       }
     }
 
     // ── Image OCR pipeline ───────────────────────────────────
     if (isImage) {
-      sendProgress('Reading document...', { step: 'extracting' });
-      sendProgress('Extracting text from image...', { step: 'ocr_page' });
+      try {
+        const ocrData = await extractTextFromImage(buffer);
+        const cleanedOCR = cleanExtractedText(ocrData.text);
+        extractionResult.text = cleanedOCR;
+        extractionResult.method = 'Image OCR';
+        extractionResult.ocrConfidence = ocrData.confidence;
 
-      const ocrData = await extractTextFromImage(buffer);
-      const cleanedOCR = cleanExtractedText(ocrData.text);
-      extractionResult.text = cleanedOCR;
-      extractionResult.method = 'Image OCR';
-      extractionResult.ocrConfidence = ocrData.confidence;
+        console.log(`[IMAGE] Extracted chars: ${cleanedOCR?.length || 0}, OCR Confidence: ${ocrData.confidence}%`);
 
-      console.log(`[IMAGE] Extracted chars: ${cleanedOCR?.length || 0}, OCR Confidence: ${ocrData.confidence}%`);
-
-      if (!cleanedOCR || cleanedOCR.trim().length < 15) {
-        return sendError('OCR could not detect readable text in this image. Please upload a clearer, higher-resolution image.');
+        if (!cleanedOCR || cleanedOCR.trim().length < 15) {
+          return res.status(422).json({
+            success: false,
+            errorType: 'OCR_FAILED',
+            error: 'OCR could not detect readable text in this image. Please upload a clearer, higher-resolution image.'
+          });
+        }
+      } catch (ocrErr) {
+        console.error('[IMAGE] OCR processing failed:', ocrErr.message);
+        return res.status(422).json({
+          success: false,
+          errorType: 'OCR_FAILED',
+          error: 'Image text extraction failed. This feature may be limited in the current deployment. Please try uploading a PDF instead.'
+        });
       }
     }
 
     // ── Summary generation ───────────────────────────────────
-    sendProgress('Preparing summary...', { step: 'summarizing' });
-    console.log(`[SUMMARY] Sending ${extractionResult.text.length} characters to summarizer module`);
-
+    console.log(`[SUMMARY] Sending ${extractionResult.text.length} characters to summarizer`);
     const analysis = await generateDocumentAnalysis(extractionResult.text, originalname);
-
-    sendProgress('Organizing key points...', { step: 'organizing' });
     console.log(`[SUMMARY] Completed analysis for "${originalname}"`);
 
     // ── Build statistics ─────────────────────────────────────
@@ -127,7 +111,7 @@ export async function analyzeDocument(req, res) {
       isScannedPdf: extractionResult.isScanned
     };
 
-    // ── MongoDB Storage ──────────────────────────────────────
+    // ── MongoDB Storage (optional, non-blocking) ─────────────
     let dbId = null;
     if (mongoose.connection.readyState === 1) {
       try {
@@ -154,7 +138,9 @@ export async function analyzeDocument(req, res) {
       }
     }
 
-    sendComplete({
+    // ── Send final JSON response ─────────────────────────────
+    return res.status(200).json({
+      success: true,
       _id: dbId,
       document: resultPayload,
       extractedText: extractionResult.text,
@@ -166,25 +152,48 @@ export async function analyzeDocument(req, res) {
 
   } catch (err) {
     console.error('[analyzeDocument] Fatal error:', err);
-    sendError(err.message || 'An unexpected error occurred while processing your document.');
+
+    // Determine error type
+    let errorType = 'PROCESSING_ERROR';
+    let statusCode = 500;
+    let message = err.message || 'An unexpected error occurred while processing your document.';
+
+    if (err.message?.includes('Could not read the PDF')) {
+      errorType = 'INVALID_PDF';
+      statusCode = 422;
+    } else if (err.message?.includes('timeout') || err.message?.includes('Timeout')) {
+      errorType = 'TIMEOUT';
+      statusCode = 504;
+      message = 'Document processing timed out. Please try a smaller or simpler document.';
+    } else if (err.message?.includes('Gemini API')) {
+      errorType = 'AI_API_ERROR';
+      statusCode = 502;
+      message = 'AI summarization service is temporarily unavailable. Please try again in a moment.';
+    }
+
+    return res.status(statusCode).json({
+      success: false,
+      errorType,
+      error: message
+    });
   }
 }
 
 /**
  * GET /api/documents
- * Fetch metadata of all recently analyzed documents (excluding full extracted text for speed)
+ * Fetch metadata of all recently analyzed documents
  */
 export async function getDocuments(req, res) {
   try {
     if (mongoose.connection.readyState !== 1) {
-      return res.status(503).json({ success: false, error: 'Database storage is disabled or offline' });
+      return res.status(503).json({ success: false, error: 'Document history is not available (database not connected).' });
     }
     const docs = await DocumentModel.find({}, '-extractedText')
       .sort({ createdAt: -1 })
       .limit(50);
     res.json({ success: true, count: docs.length, data: docs });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    res.status(500).json({ success: false, error: 'Failed to fetch document history.' });
   }
 }
 
@@ -195,13 +204,12 @@ export async function getDocuments(req, res) {
 export async function getDocumentById(req, res) {
   try {
     if (mongoose.connection.readyState !== 1) {
-      return res.status(503).json({ success: false, error: 'Database storage is disabled or offline' });
+      return res.status(503).json({ success: false, error: 'Document history is not available (database not connected).' });
     }
     const doc = await DocumentModel.findById(req.params.id);
     if (!doc) {
-      return res.status(404).json({ success: false, error: 'Document summary not found' });
+      return res.status(404).json({ success: false, error: 'Document summary not found.' });
     }
-    // Format to match the analyzer response structure
     res.json({
       success: true,
       data: {
@@ -226,7 +234,7 @@ export async function getDocumentById(req, res) {
       }
     });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    res.status(500).json({ success: false, error: 'Failed to fetch document details.' });
   }
 }
 
@@ -237,14 +245,14 @@ export async function getDocumentById(req, res) {
 export async function deleteDocument(req, res) {
   try {
     if (mongoose.connection.readyState !== 1) {
-      return res.status(503).json({ success: false, error: 'Database storage is disabled or offline' });
+      return res.status(503).json({ success: false, error: 'Document history is not available (database not connected).' });
     }
     const doc = await DocumentModel.findByIdAndDelete(req.params.id);
     if (!doc) {
-      return res.status(404).json({ success: false, error: 'Document summary not found' });
+      return res.status(404).json({ success: false, error: 'Document summary not found.' });
     }
-    res.json({ success: true, message: 'Document summary successfully deleted' });
+    res.json({ success: true, message: 'Document summary successfully deleted.' });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    res.status(500).json({ success: false, error: 'Failed to delete document summary.' });
   }
 }

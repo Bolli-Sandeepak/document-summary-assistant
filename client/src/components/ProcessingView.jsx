@@ -1,70 +1,49 @@
 import React, { useEffect, useState } from 'react';
-import { Check, Loader2, FileText } from 'lucide-react';
+import { Check, Loader2 } from 'lucide-react';
 
 /**
- * ProcessingView — shows live progress events streamed from the server.
- * `liveMessage` is the latest message string forwarded by App.jsx from the SSE stream.
- * `ocrProgress` carries { current, total } when page-by-page OCR is running.
+ * ProcessingView — shows animated progress stages during document analysis.
+ * Uses simulated progress stages from the API client.
  */
 export function ProcessingView({ filename, liveMessage, ocrProgress }) {
-  const stageOrder = ['checking', 'extracting', 'ocr_detect', 'ocr_pages', 'summarizing', 'organizing'];
-
-  // Derive stage from liveMessage
-  const getStageFromMessage = (msg = '') => {
-    const m = msg.toLowerCase();
-    if (m.includes('checking')) return 'checking';
-    if (m.includes('scanned') || m.includes('analyzing pages') || m.includes('require ocr')) return 'ocr_detect';
-    if (m.includes('page') && (m.includes('reading') || m.includes('extracting text from page') || m.includes('ocr'))) return 'ocr_pages';
-    if (m.includes('preparing summary') || m.includes('summary')) return 'summarizing';
-    if (m.includes('organizing') || m.includes('key points')) return 'organizing';
-    if (m.includes('extracting')) return 'extracting';
-    return 'checking';
-  };
-
-  const calculatedStage = getStageFromMessage(liveMessage);
-  const calculatedIndex = stageOrder.indexOf(calculatedStage);
-
-  // Maintain highest achieved stage index to prevent backward UI state jumps
-  const [maxStageIndex, setMaxStageIndex] = useState(0);
-
-  useEffect(() => {
-    if (calculatedIndex > maxStageIndex) {
-      setMaxStageIndex(calculatedIndex);
-    }
-  }, [calculatedIndex, maxStageIndex]);
-
-  const currentStageIndex = Math.max(calculatedIndex, maxStageIndex);
-  const currentStage = stageOrder[currentStageIndex] || 'checking';
-
-  // If OCR stage was encountered, keep showing OCR steps
-  const [showOcrSteps, setShowOcrSteps] = useState(false);
-  useEffect(() => {
-    if (currentStage === 'ocr_detect' || currentStage === 'ocr_pages' || showOcrSteps) {
-      setShowOcrSteps(true);
-    }
-  }, [currentStage, showOcrSteps]);
-
-  const baseSteps = [
-    { key: 'checking', label: 'Checking document' },
+  const allSteps = [
+    { key: 'uploading', label: 'Uploading document' },
     { key: 'extracting', label: 'Extracting text' },
-  ];
-
-  const ocrSteps = showOcrSteps ? [
-    { key: 'ocr_detect', label: 'Scanned content detected' },
-    { key: 'ocr_pages', label: ocrProgress ? `Reading page ${ocrProgress.current} of ${ocrProgress.total}` : 'Reading pages...' },
-  ] : [];
-
-  const endSteps = [
-    { key: 'summarizing', label: 'Preparing summary' },
+    { key: 'analyzing', label: 'Analyzing content' },
+    { key: 'summarizing', label: 'Generating summary' },
     { key: 'organizing', label: 'Organizing key points' },
   ];
 
-  const steps = [...baseSteps, ...ocrSteps, ...endSteps];
+  // Derive current step from liveMessage
+  const getStepFromMessage = (msg = '') => {
+    const m = msg.toLowerCase();
+    if (m.includes('organizing') || m.includes('key points')) return 'organizing';
+    if (m.includes('summary') || m.includes('summariz')) return 'summarizing';
+    if (m.includes('analyz')) return 'analyzing';
+    if (m.includes('extract') || m.includes('processing text') || m.includes('reading document')) return 'extracting';
+    if (m.includes('upload')) return 'uploading';
+    if (m.includes('complete')) return 'complete';
+    return 'uploading';
+  };
 
-  const stepStatus = (key) => {
-    const keyIndex = stageOrder.indexOf(key);
-    if (keyIndex < currentStageIndex) return 'completed';
-    if (keyIndex === currentStageIndex) return 'active';
+  const currentStep = getStepFromMessage(liveMessage);
+  const currentIndex = allSteps.findIndex(s => s.key === currentStep);
+
+  // Track highest reached step to prevent backward jumps
+  const [maxIndex, setMaxIndex] = useState(0);
+
+  useEffect(() => {
+    const idx = currentIndex >= 0 ? currentIndex : 0;
+    if (idx > maxIndex) {
+      setMaxIndex(idx);
+    }
+  }, [currentIndex, maxIndex]);
+
+  const activeIndex = Math.max(currentIndex >= 0 ? currentIndex : 0, maxIndex);
+
+  const stepStatus = (idx) => {
+    if (idx < activeIndex) return 'completed';
+    if (idx === activeIndex) return 'active';
     return 'pending';
   };
 
@@ -82,8 +61,8 @@ export function ProcessingView({ filename, liveMessage, ocrProgress }) {
           <span>Document received</span>
         </div>
 
-        {steps.map((step) => {
-          const status = stepStatus(step.key);
+        {allSteps.map((step, idx) => {
+          const status = stepStatus(idx);
           return (
             <div key={step.key} className={`checklist-item ${status}`}>
               <div className="item-status-icon">
@@ -98,6 +77,16 @@ export function ProcessingView({ filename, liveMessage, ocrProgress }) {
           );
         })}
       </div>
+
+      <p style={{ 
+        fontSize: '0.8rem', 
+        color: 'var(--text-muted)', 
+        textAlign: 'center', 
+        marginTop: '1.5rem',
+        fontStyle: 'italic'
+      }}>
+        This may take 15–60 seconds depending on document size...
+      </p>
 
       <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
     </div>

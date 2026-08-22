@@ -4,12 +4,16 @@ node_modules/
 
 # Environment files (NEVER commit secrets to Git)
 .env
-.env.*
-*.env
-**/.env
-**/.env.*
+.env.local
+.env.development.local
+.env.production.local
+.env.test.local
 server/.env
 client/.env
+
+# Allow .env.example files (they contain no secrets)
+!.env.example
+!server/.env.example
 
 # Build output
 dist/
@@ -24,8 +28,15 @@ uploads/
 temp/
 *.log
 
+# OCR trained data (large binary files)
+eng.traineddata
+*.traineddata
+
 # OS & IDE junk
 .DS_Store
 Thumbs.db
 .idea/
 .vscode/
+
+# Vercel
+.vercel/

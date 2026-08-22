@@ -94,9 +94,6 @@ export default function App() {
 
     const handleProgress = (event) => {
       if (event.message) setLiveMessage(event.message);
-      if (event.step === 'ocr_page' && event.current && event.total) {
-        setOcrProgress({ current: event.current, total: event.total });
-      }
     };
 
     try {

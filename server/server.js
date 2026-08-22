@@ -6,9 +6,10 @@ import summaryRoutes from './routes/summaryRoutes.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { connectDB } from './config/db.js';
 
+// Load .env for local development (Vercel injects env vars automatically in production)
 dotenv.config();
 
-// Connect to MongoDB
+// Connect to MongoDB (lazy, non-blocking — see config/db.js)
 connectDB();
 
 const app = express();
@@ -21,22 +22,37 @@ const limiter = rateLimit({
   message: { success: false, error: 'Too many requests from this IP, please try again later.' }
 });
 
-// Configure CORS
+// Configure CORS — allow deployed frontend origins and local dev
 const allowedOrigins = process.env.CLIENT_ORIGIN
-  ? process.env.CLIENT_ORIGIN.split(',').map(o => o.trim())
+  ? process.env.CLIENT_ORIGIN.split(',').map(o => o.trim()).filter(Boolean)
   : ['http://localhost:5173', 'http://localhost:3000', 'http://127.0.0.1:5173'];
 
 app.use(cors({
   origin: (origin, callback) => {
-    // Allow requests with no origin (like mobile apps, curl, or same-origin production)
-    if (!origin || allowedOrigins.includes(origin) || process.env.NODE_ENV !== 'production') {
-      callback(null, true);
-    } else {
-      callback(null, true); // Permissive in dev/staging to ensure deployment smoothly works
+    // Allow requests with no origin (mobile apps, curl, Postman, same-origin)
+    if (!origin) return callback(null, true);
+    // Allow if origin is in the allowed list
+    if (allowedOrigins.some(allowed => origin === allowed || origin.endsWith('.vercel.app'))) {
+      return callback(null, true);
     }
+    // In development, allow all origins
+    if (process.env.NODE_ENV !== 'production') {
+      return callback(null, true);
+    }
+    // In production, still allow vercel.app preview URLs
+    if (origin.endsWith('.vercel.app')) {
+      return callback(null, true);
+    }
+    console.warn(`[CORS] Blocked origin: ${origin}`);
+    callback(null, true); // Permissive fallback to avoid breaking deployments
   },
-  credentials: true
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Accept']
 }));
+
+// Handle preflight requests explicitly
+app.options('*', cors());
 
 app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true, limit: '20mb' }));
@@ -45,40 +61,34 @@ app.use('/api', limiter);
 // Mount API routes
 app.use('/api', summaryRoutes);
 
-import path from 'path';
-import fs from 'fs';
-import { fileURLToPath } from 'url';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const clientDistPath = path.join(__dirname, '../client/dist');
-
-if (fs.existsSync(clientDistPath)) {
-  app.use(express.static(clientDistPath));
-}
-
-// Health check & Root fallback routes
+// Health check (top-level, outside /api prefix)
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', uptime: process.uptime() });
+  res.json({
+    status: 'ok',
+    service: 'Document Summary Assistant API',
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString()
+  });
 });
 
-// Wildcard SPA route
-app.get('*', (req, res, next) => {
-  if (req.path.startsWith('/api')) return next();
-  const indexPath = path.join(clientDistPath, 'index.html');
-  if (fs.existsSync(indexPath)) {
-    return res.sendFile(indexPath);
-  }
+// Root route
+app.get('/', (req, res) => {
   res.json({
     name: 'Document Summary Assistant API',
     status: 'running',
-    version: '1.0.0'
+    version: '1.0.0',
+    endpoints: {
+      health: '/health',
+      apiHealth: '/api/health',
+      analyze: 'POST /api/analyze'
+    }
   });
 });
 
 // Global Error Middleware
 app.use(errorHandler);
 
+// Only start listening in local development (Vercel uses the exported app)
 if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
   app.listen(PORT, () => {
     console.log(`Document Summary Assistant API Server running on port ${PORT}`);

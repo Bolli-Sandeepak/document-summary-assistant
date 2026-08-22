@@ -1,30 +1,29 @@
 /**
  * Text cleaning service.
- * Removes OCR artifacts, duplicated fragments, slide junk, and normalizes whitespace.
+ * Fixes common PDF extraction artifacts: joined words, broken spacing,
+ * duplicate lines, OCR noise, and normalizes whitespace.
  */
 
 /**
- * Main cleaner — call after combining all extracted/OCR text.
+ * Main cleaner — call after extracting text from PDF or OCR.
  * @param {string} rawText
  * @returns {string} cleaned text
  */
 export function cleanExtractedText(rawText) {
   if (!rawText || typeof rawText !== 'string') return '';
 
-  // 1. Remove inline noise & symbols before line-by-line checks
-  let text = removeInlineNoise(rawText);
+  let text = rawText;
 
-  // 2. Normalize line endings
+  // 1. Normalize line endings
   text = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 
-  // 3. Fix multi-column slide OCR artifacts.
-  text = text.replace(/(\b\w+\b)\s+\1\b/gi, '$1');
+  // 2. Fix common PDF extraction artifacts
+  text = fixJoinedWords(text);
 
-  // 4. Remove inline same-phrase repetitions
-  text = text.replace(/\b(.{4,80}?)\s+\1\b/g, '$1');
-  text = text.replace(/(\w+)\s+\1\b/g, '$1');
+  // 3. Fix broken hyphenation (word-\n continuation)
+  text = text.replace(/(\w)-\n(\w)/g, '$1$2');
 
-  // 5. Split into lines for per-line cleaning
+  // 4. Process line by line
   const rawLines = text.split('\n');
   const cleanedLines = [];
   const seenLines = new Map();
@@ -32,25 +31,30 @@ export function cleanExtractedText(rawText) {
   for (const line of rawLines) {
     const trimmed = line.trim();
 
+    // Keep blank lines as paragraph separators
     if (!trimmed) {
       cleanedLines.push('');
       continue;
     }
 
+    // Skip garbage/noise lines
     if (isGarbageLine(trimmed)) continue;
 
+    // Normalize internal whitespace (but preserve the line)
     const normalized = trimmed.replace(/\s+/g, ' ');
 
-    // Deduplicate slide headers
-    const key = normalized.toLowerCase();
-    const count = seenLines.get(key) || 0;
-    if (count >= 2) continue;
-    seenLines.set(key, count + 1);
+    // Deduplicate: allow up to 2 occurrences (headers may repeat across pages)
+    const key = normalized.toLowerCase().replace(/\s+/g, ' ');
+    if (key.length > 10) {
+      const count = seenLines.get(key) || 0;
+      if (count >= 2) continue;
+      seenLines.set(key, count + 1);
+    }
 
     cleanedLines.push(normalized);
   }
 
-  // 6. Collapse consecutive blank lines
+  // 5. Collapse consecutive blank lines (max 1 blank line between paragraphs)
   const collapsed = [];
   let prevWasBlank = false;
   for (const line of cleanedLines) {
@@ -63,126 +67,103 @@ export function cleanExtractedText(rawText) {
     }
   }
 
-  // 7. Remove page markers
   let result = collapsed.join('\n');
-  result = result.replace(/\n*--- Page \d+ ---\n*/g, '\n\n');
 
-  // 8. Merge isolated fragments
-  result = mergeStrayFragments(result);
+  // 6. Remove page markers/numbers
+  result = result.replace(/\n*---\s*Page\s*\d+\s*---\n*/g, '\n\n');
+  result = result.replace(/^\s*\d+\s*$/gm, ''); // Standalone page numbers
 
-  // 9. Paragraph deduplication
+  // 7. Clean punctuation spacing (OCR artifacts)
+  result = cleanPunctuation(result);
+
+  // 8. Remove repeated paragraphs (exact match across full text)
   result = removeRepeatedParagraphs(result);
 
-  // 10. Clean punctuation spacing issues often introduced by OCR
-  result = cleanOcrPunctuation(result);
+  // 9. Final whitespace cleanup
+  result = result.replace(/\n{3,}/g, '\n\n');
 
   return result.trim();
 }
 
 /**
- * Remove inline noise sequences (like "=A / < s ors / é 447", "Too = = — a ge s = — id")
+ * Fix words that were joined together during PDF extraction.
+ * Common patterns:
+ * - "TensorCont'd" → "Tensor Cont'd"
+ * - "1DTensor/Vector" → "1D Tensor / Vector"
+ * - "ForExample" → "For Example" (camelCase in non-code context)
+ * - "Selva Kumar S(SCOPE)" → "Selva Kumar S (SCOPE)"
  */
-function removeInlineNoise(text) {
-  // Replace double symbols with space to ease parsing
-  let temp = text.replace(/[=<>\/\\|_\~\+\—\-]{2,}/g, ' ');
+function fixJoinedWords(text) {
+  // Add space before opening parentheses that follow a word character directly
+  text = text.replace(/(\w)\(([A-Z])/g, '$1 ($2');
 
-  const lines = temp.split('\n');
-  const processedLines = lines.map(line => {
-    // Preserve header formatting if it's markdown
-    if (line.trim().startsWith('#')) return line;
-
-    const words = line.split(/\s+/);
-    const cleanedWords = [];
-    
-    let i = 0;
-    while (i < words.length) {
-      const w = words[i];
-      if (!w) {
-        i++;
-        continue;
-      }
-      
-      const cleanW = w.replace(/[.,;:\?!()\"'“”’]/g, '');
-
-      // 1. Pure symbols/operators -> skip
-      if (/^[=\-\—\+\~\<\>\/\\\|_#\*\@\$\%\^&\(\):“’”‘"'\.,;]+$/.test(w)) {
-        i++;
-        continue;
-      }
-      
-      // 2. Short non-alphanumeric noise -> skip
-      if (/^[=\-\—\+\~\<\>\/\\\|_#\*\@\$\%\^]{2,}$/.test(w)) {
-        i++;
-        continue;
-      }
-
-      cleanedWords.push(w);
-      i++;
-    }
-    
-    return cleanedWords.join(' ');
+  // Fix "word/word" where the slash has no spaces (but preserve URLs and paths)
+  text = text.replace(/([a-zA-Z])\/([a-zA-Z])/g, (match, before, after) => {
+    // Don't break URL-like patterns
+    if (/https?/.test(before)) return match;
+    return `${before} / ${after}`;
   });
 
-  return processedLines.join('\n');
+  // Fix camelCase-like joins in non-code text
+  // "ForExample" → "For Example", "TensorCont" → "Tensor Cont"
+  // Only split at lowercase→uppercase boundaries where both parts are ≥2 chars
+  text = text.replace(/([a-z])([A-Z][a-z])/g, (match, before, after) => {
+    return `${before} ${after}`;
+  });
+
+  // Fix number-letter joins: "1DTensor" → "1D Tensor", "2DMatrix" → "2D Matrix"
+  text = text.replace(/(\d)([A-Z][a-z]{2,})/g, '$1 $2');
+
+  // Fix "word•word" or "word·word" (bullet joins)
+  text = text.replace(/(\w)[•·](\w)/g, '$1 • $2');
+
+  // Fix missing space after periods in mid-sentence
+  // "sentence.Next" → "sentence. Next" (but not "Dr.Smith" or "e.g.")
+  text = text.replace(/([a-z])\.([A-Z][a-z]{2,})/g, '$1. $2');
+
+  // Fix missing space after commas
+  text = text.replace(/,([A-Za-z])/g, ', $1');
+
+  return text;
 }
 
 /**
- * Clean spacing and formatting around punctuation marks often broken by Tesseract
+ * Clean spacing around punctuation marks.
  */
-function cleanOcrPunctuation(text) {
+function cleanPunctuation(text) {
   return text
-    // Fix spaces before punctuation (e.g., "word ." -> "word.")
-    .replace(/\s+([.,;:!\?])/g, '$1')
-    // Fix multiple spacing
-    .replace(/[ ]{2,}/g, ' ')
-    // Ensure space after punctuation
-    .replace(/([.,;:!\?])([a-zA-Z])/g, '$1 $2')
-    // Fix quotes spacing
+    // Fix spaces before punctuation ("word ." → "word.")
+    .replace(/\s+([.,;:!?])/g, '$1')
+    // Fix multiple spaces
+    .replace(/ {2,}/g, ' ')
+    // Ensure space after punctuation when followed by a letter
+    .replace(/([.,;:!?])([a-zA-Z])/g, '$1 $2')
+    // Fix parentheses spacing
     .replace(/\(\s+/g, '(')
     .replace(/\s+\)/g, ')');
 }
 
 /**
- * Merge isolated 1-3 word lines into the nearest paragraph to prevent stray fragments.
- */
-function mergeStrayFragments(text) {
-  const paragraphs = text.split(/\n\n+/);
-  const merged = [];
-
-  for (let i = 0; i < paragraphs.length; i++) {
-    const para = paragraphs[i].trim();
-    const words = para.split(/\s+/).filter(Boolean).length;
-
-    if (words <= 3 && words > 0 && !/^#+/.test(para)) {
-      if (merged.length > 0) {
-        merged[merged.length - 1] = merged[merged.length - 1] + ' ' + para;
-      } else {
-        merged.push(para);
-      }
-    } else {
-      merged.push(para);
-    }
-  }
-
-  return merged.join('\n\n');
-}
-
-/**
- * Detect junk/garbage lines produced by OCR or PDF extraction artifacts.
+ * Detect junk/garbage lines produced by PDF extraction or OCR.
  */
 function isGarbageLine(line) {
+  // Very short lines with no alphabetic content
   if (line.length <= 2) return true;
 
+  // Lines full of question marks (OCR noise)
   if (/\?{3,}/.test(line)) return true;
 
-  if (/^[\d\s\.\-\|\/\\:]+$/.test(line)) return true;
+  // Lines that are just numbers, dots, dashes, pipes
+  if (/^[\d\s.\-|/\\:_,]+$/.test(line) && line.length < 20) return true;
 
+  // Lines of pure symbols/non-alphabetic characters
   if (/^[^a-zA-Z0-9\s]{3,}$/.test(line)) return true;
 
+  // Lines with very low alphabetic ratio (likely OCR noise)
   const nonSpace = line.replace(/\s/g, '');
-  if (nonSpace.length > 5) {
+  if (nonSpace.length > 8) {
     const alphaCount = (nonSpace.match(/[a-zA-Z]/g) || []).length;
-    if (alphaCount / nonSpace.length < 0.3) return true;
+    if (alphaCount / nonSpace.length < 0.25) return true;
   }
 
   return false;
@@ -198,7 +179,8 @@ function removeRepeatedParagraphs(text) {
 
   for (const para of paragraphs) {
     const key = para.trim().toLowerCase().replace(/\s+/g, ' ');
-    if (key.length < 15) {
+    // Don't deduplicate very short paragraphs (could be bullet items)
+    if (key.length < 20) {
       unique.push(para);
       continue;
     }
