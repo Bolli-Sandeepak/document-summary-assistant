@@ -1,13 +1,13 @@
 # Approach Write-Up: Document Summary Assistant
 
-The Document Summary Assistant is a full-stack web application designed for seamless document content extraction and multi-level summarization.
+The Document Summary Assistant is a full-stack web application designed for automated document text extraction and intelligent multi-level summarization.
 
-Users upload PDF or image files (JPG, PNG) via an interactive drag-and-drop interface with real-time format and file size validation.
-
-The Express backend routes documents through specialized processing pipelines: selectable-text PDFs are parsed using `pdf-parse`, while scanned images undergo Optical Character Recognition (OCR) via `tesseract.js`.
-
-Extracted text is processed by Google Gemini API (with an automated statistical fallback engine for offline reliability) to generate structured JSON payloads. The application produces three selectable summary lengths (Short, Medium, Long), extracts numbered key-point insight cards, and suggests actionable document improvements.
-
-Communication between the React frontend and Express backend utilizes RESTful endpoints (`POST /api/analyze`) with `multipart/form-data` payload streams and in-memory buffer processing for complete user privacy.
-
-The architecture is streamlined for cloud deployment: the Vite React frontend deploys to Vercel/Netlify, while the Node.js Express server runs on Render. Environment variables safeguard API secrets, CORS policies protect endpoints, and custom CSS design tokens deliver a modern, responsive document reader experience across all devices.
+### Architecture & Pipeline
+1. **Document Upload & Ingestion:** Users upload PDF documents or scanned images (PNG, JPG) via an intuitive drag-and-drop or file picker interface with real-time format and size validation.
+2. **Text Extraction:** Selectable PDFs are parsed using an enhanced spatial renderer with `pdf-parse` that preserves line breaks, column structures, and headings while repairing joined words and OCR artifacts. Scanned images are processed via `tesseract.js` OCR.
+3. **Smart Summarization:** Extracted text is analyzed using Google Gemini AI (`gemini-3.5-flash`) with chunking for large documents (or a local statistical fallback engine if offline). The system generates structured JSON payloads with:
+   - **Multi-Level Summaries:** Short (2-3 sentences), Medium (2-3 paragraphs), and Long (comprehensive).
+   - **Key Points:** Numbered core concepts and essential takeaways.
+   - **Important Terms:** Domain-specific terms with concise explanations.
+   - **Improvement Suggestions:** Actionable feedback on document depth and clarity.
+4. **Cloud Deployment:** Deployed seamlessly on Vercel with serverless API routing, CORS protection, responsive mobile/desktop UI, and optional MongoDB Atlas history storage.
