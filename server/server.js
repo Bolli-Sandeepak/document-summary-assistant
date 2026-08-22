@@ -2,56 +2,53 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import rateLimit from 'express-rate-limit';
+import path from 'path';
+import fs from 'fs';
+import { fileURLToPath } from 'url';
 import summaryRoutes from './routes/summaryRoutes.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { connectDB } from './config/db.js';
 
-// Load .env for local development (Vercel injects env vars automatically in production)
 dotenv.config();
 
-// Connect to MongoDB (lazy, non-blocking — see config/db.js)
+// Connect to MongoDB
 connectDB();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Rate limiting to prevent abuse
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const clientDistPath = path.join(__dirname, '../client/dist');
+
+// Rate limiting
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // Limit each IP to 100 requests per windowMs
+  windowMs: 15 * 60 * 1000,
+  max: 100,
   message: { success: false, error: 'Too many requests from this IP, please try again later.' }
 });
 
-// Configure CORS — allow deployed frontend origins and local dev
+// Configure CORS
 const allowedOrigins = process.env.CLIENT_ORIGIN
   ? process.env.CLIENT_ORIGIN.split(',').map(o => o.trim()).filter(Boolean)
   : ['http://localhost:5173', 'http://localhost:3000', 'http://127.0.0.1:5173'];
 
 app.use(cors({
   origin: (origin, callback) => {
-    // Allow requests with no origin (mobile apps, curl, Postman, same-origin)
     if (!origin) return callback(null, true);
-    // Allow if origin is in the allowed list
     if (allowedOrigins.some(allowed => origin === allowed || origin.endsWith('.vercel.app'))) {
       return callback(null, true);
     }
-    // In development, allow all origins
-    if (process.env.NODE_ENV !== 'production') {
+    if (process.env.NODE_ENV !== 'production' || origin.endsWith('.vercel.app')) {
       return callback(null, true);
     }
-    // In production, still allow vercel.app preview URLs
-    if (origin.endsWith('.vercel.app')) {
-      return callback(null, true);
-    }
-    console.warn(`[CORS] Blocked origin: ${origin}`);
-    callback(null, true); // Permissive fallback to avoid breaking deployments
+    callback(null, true);
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'Accept']
 }));
 
-// Handle preflight requests explicitly
 app.options('*', cors());
 
 app.use(express.json({ limit: '20mb' }));
@@ -61,7 +58,7 @@ app.use('/api', limiter);
 // Mount API routes
 app.use('/api', summaryRoutes);
 
-// Health check (top-level, outside /api prefix)
+// Health check
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
@@ -71,24 +68,24 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Root route
-app.get('/', (req, res) => {
-  res.json({
-    name: 'Document Summary Assistant API',
-    status: 'running',
-    version: '1.0.0',
-    endpoints: {
-      health: '/health',
-      apiHealth: '/api/health',
-      analyze: 'POST /api/analyze'
-    }
-  });
+// Serve static frontend assets if available
+if (fs.existsSync(clientDistPath)) {
+  app.use(express.static(clientDistPath));
+}
+
+// Fallback: serve React SPA index.html for all non-API routes
+app.get('*', (req, res, next) => {
+  if (req.path.startsWith('/api') || req.path === '/health') return next();
+  const indexPath = path.join(clientDistPath, 'index.html');
+  if (fs.existsSync(indexPath)) {
+    return res.sendFile(indexPath);
+  }
+  res.status(404).json({ error: 'Not found' });
 });
 
 // Global Error Middleware
 app.use(errorHandler);
 
-// Only start listening in local development (Vercel uses the exported app)
 if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
   app.listen(PORT, () => {
     console.log(`Document Summary Assistant API Server running on port ${PORT}`);
