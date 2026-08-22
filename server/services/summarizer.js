@@ -44,7 +44,7 @@ async function generateWithGemini(text, filename, apiKey) {
 
   const prompt = buildAnalysisPrompt(processText, filename);
 
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${apiKey}`;
 
   const response = await fetch(endpoint, {
     method: 'POST',
@@ -140,7 +140,7 @@ async function summarizeLargeDocumentWithGemini(text, filename, apiKey) {
   console.log(`[summarizer] Processing ${chunks.length} chunks for ${filename}`);
 
   const chunkSummaries = [];
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${apiKey}`;
 
   for (let i = 0; i < chunks.length; i++) {
     const chunkPrompt = `You are analyzing Section ${i + 1} of ${chunks.length} of document "${filename}".
